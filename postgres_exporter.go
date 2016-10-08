@@ -82,13 +82,13 @@ func makeDescMap(recipes []common.MetricQueryRecipe) map[string]MetricMapNamespa
 
 		// Get the constant labels
 		var constLabels []string
-		for columnName, columnMapping := range recipe.Resultmap {
+		for columnName, columnMapping := range recipe.ResultMap {
 			if columnMapping.Usage == common.LABEL {
 				constLabels = append(constLabels, columnName)
 			}
 		}
 
-		for columnName, columnMapping := range recipe.Resultmap {
+		for columnName, columnMapping := range recipe.ResultMap {
 			switch columnMapping.Usage {
 			case common.DISCARD, common.LABEL:
 				thisMap[columnName] = MetricMap{
@@ -321,9 +321,9 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 		log.Debugln("Querying namespace: ", namespace)
 		func() {
 			// Don't fail on a bad scrape of one metric
-			rows, err := db.Query(recipe.Sqlquery)
+			rows, err := db.Query(recipe.SqlQuery)
 			if err != nil {
-				log.Infof("Error running query <%s> for '%s' on database: %v", recipe.Sqlquery, namespace, err)
+				log.Infof("Error running query <%s> for '%s' on database: %v", recipe.SqlQuery, namespace, err)
 				e.error.Set(1)
 				return
 			}
@@ -411,7 +411,7 @@ func main() {
 		log.Fatalf("-extend.query-path is a required argument")
 	}
 
-	recipes, err := config.GetRecipes(*queriesPath)
+	recipes, err := config.ReadRecipesFile(*queriesPath)
 	if err != nil {
 		log.Fatalf("error parsing file %q: %v", *queriesPath, err)
 	}

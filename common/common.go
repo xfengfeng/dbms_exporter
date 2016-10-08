@@ -7,6 +7,7 @@ import (
 type ColumnUsage int
 
 const (
+	_                        = iota
 	DISCARD      ColumnUsage = iota // Ignore this column
 	LABEL        ColumnUsage = iota // Use this column as a label
 	COUNTER      ColumnUsage = iota // Use this column as a counter
@@ -53,8 +54,8 @@ func StringToColumnUsage(s string) (u ColumnUsage, err error) {
 type MetricQueryRecipe struct {
 	// Basename is typically the name of a table to query
 	Basename string
-	// Sqlquery is what should be executed
-	Sqlquery string
-	// Resultmap maps column names in the resultset to the ColumnMapping that should be used to build a metric
-	Resultmap map[string]ColumnMapping
+	// SqlQuery is what should be executed
+	SqlQuery string
+	// ResultMap maps column names in the resultset to the ColumnMapping that should be used to build a metric
+	ResultMap map[string]ColumnMapping
 }
