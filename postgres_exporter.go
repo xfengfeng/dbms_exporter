@@ -4,16 +4,15 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"gopkg.in/yaml.v2"
-
 	_ "github.com/lib/pq"
+	"github.com/ncabatoff/dbms_exporter/common"
+	"github.com/ncabatoff/dbms_exporter/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
 )
@@ -58,24 +57,6 @@ var landingPage = []byte(`<html>
 </html>
 `)
 
-type ColumnUsage int
-
-const (
-	DISCARD      ColumnUsage = iota // Ignore this column
-	LABEL        ColumnUsage = iota // Use this column as a label
-	COUNTER      ColumnUsage = iota // Use this column as a counter
-	GAUGE        ColumnUsage = iota // Use this column as a gauge
-	MAPPEDMETRIC ColumnUsage = iota // Use this column with the supplied mapping of text values
-	DURATION     ColumnUsage = iota // This column should be interpreted as a text duration (and converted to milliseconds)
-)
-
-// User-friendly representation of a prometheus descriptor map
-type ColumnMapping struct {
-	usage       ColumnUsage
-	description string
-	mapping     map[string]float64 // Optional column mapping for MAPPEDMETRIC
-}
-
 // Groups metric maps under a shared set of labels
 type MetricMapNamespace struct {
 	labels         []string             // Label names for this namespace
@@ -91,150 +72,68 @@ type MetricMap struct {
 	conversion func(interface{}) (float64, bool) // Conversion function to turn PG result into float64
 }
 
-type MetricQueryRecipe struct {
-	// basename is typically the name of a table to query
-	basename string
-	// sqlquery is what should be executed
-	sqlquery string
-	// resultmap maps column names in the resultset to the ColumnMapping that should be used to build a metric
-	resultmap map[string]ColumnMapping
-}
-
-func dumpMaps(recipes []MetricQueryRecipe) {
-	for _, recipe := range recipes {
-		fmt.Println(recipe.basename)
-		fmt.Printf("  %s\n", recipe.sqlquery)
-		for column, details := range recipe.resultmap {
-			fmt.Printf("    %-40s %v\n", column, details)
-		}
-		fmt.Println()
-	}
-}
-
-func getRecipes(queriesPath string) ([]MetricQueryRecipe, error) {
-	var yamldata map[string]interface{}
-
-	content, err := ioutil.ReadFile(queriesPath)
-	if err != nil {
-		return nil, err
-	}
-
-	err = yaml.Unmarshal(content, &yamldata)
-	if err != nil {
-		return nil, err
-	}
-
-	var recipes []MetricQueryRecipe
-	for basename, specs := range yamldata {
-		query := "select * from " + basename
-		metric_map := make(map[string]ColumnMapping)
-
-		for key, value := range specs.(map[interface{}]interface{}) {
-			switch key.(string) {
-			case "query":
-				query = value.(string)
-
-			case "metrics":
-				for _, c := range value.([]interface{}) {
-					column := c.(map[interface{}]interface{})
-
-					for n, a := range column {
-						var cmap ColumnMapping
-
-						name := n.(string)
-
-						for attr_key, attr_val := range a.(map[interface{}]interface{}) {
-							switch attr_key.(string) {
-							case "usage":
-								usage, err := stringToColumnUsage(attr_val.(string))
-								if err != nil {
-									return nil, err
-								}
-								cmap.usage = usage
-							case "description":
-								cmap.description = attr_val.(string)
-							}
-						}
-
-						cmap.mapping = nil
-
-						metric_map[name] = cmap
-					}
-				}
-			}
-		}
-		recipes = append(recipes, MetricQueryRecipe{
-			basename:  basename,
-			sqlquery:  query,
-			resultmap: metric_map,
-		})
-	}
-
-	return recipes, nil
-}
-
 // Turn the MetricMap column mapping into a prometheus descriptor mapping.
-func makeDescMap(recipes []MetricQueryRecipe) map[string]MetricMapNamespace {
+func makeDescMap(recipes []common.MetricQueryRecipe) map[string]MetricMapNamespace {
 	var metricMap = make(map[string]MetricMapNamespace)
 
 	for _, recipe := range recipes {
-		namespace := recipe.basename
+		namespace := recipe.Basename
 		thisMap := make(map[string]MetricMap)
 
 		// Get the constant labels
 		var constLabels []string
-		for columnName, columnMapping := range recipe.resultmap {
-			if columnMapping.usage == LABEL {
+		for columnName, columnMapping := range recipe.Resultmap {
+			if columnMapping.Usage == common.LABEL {
 				constLabels = append(constLabels, columnName)
 			}
 		}
 
-		for columnName, columnMapping := range recipe.resultmap {
-			switch columnMapping.usage {
-			case DISCARD, LABEL:
+		for columnName, columnMapping := range recipe.Resultmap {
+			switch columnMapping.Usage {
+			case common.DISCARD, common.LABEL:
 				thisMap[columnName] = MetricMap{
 					discard: true,
 					conversion: func(in interface{}) (float64, bool) {
 						return math.NaN(), true
 					},
 				}
-			case COUNTER:
+			case common.COUNTER:
 				thisMap[columnName] = MetricMap{
 					vtype: prometheus.CounterValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.description, constLabels, nil),
+					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.Description, constLabels, nil),
 					conversion: func(in interface{}) (float64, bool) {
 						return dbToFloat64(in)
 					},
 				}
-			case GAUGE:
+			case common.GAUGE:
 				thisMap[columnName] = MetricMap{
 					vtype: prometheus.GaugeValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.description, constLabels, nil),
+					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.Description, constLabels, nil),
 					conversion: func(in interface{}) (float64, bool) {
 						return dbToFloat64(in)
 					},
 				}
-			case MAPPEDMETRIC:
+			case common.MAPPEDMETRIC:
 				thisMap[columnName] = MetricMap{
 					vtype: prometheus.GaugeValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.description, constLabels, nil),
+					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.Description, constLabels, nil),
 					conversion: func(in interface{}) (float64, bool) {
 						text, ok := in.(string)
 						if !ok {
 							return math.NaN(), false
 						}
 
-						val, ok := columnMapping.mapping[text]
+						val, ok := columnMapping.Mapping[text]
 						if !ok {
 							return math.NaN(), false
 						}
 						return val, true
 					},
 				}
-			case DURATION:
+			case common.DURATION:
 				thisMap[columnName] = MetricMap{
 					vtype: prometheus.GaugeValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s_milliseconds", namespace, columnName), columnMapping.description, constLabels, nil),
+					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s_milliseconds", namespace, columnName), columnMapping.Description, constLabels, nil),
 					conversion: func(in interface{}) (float64, bool) {
 						var durationString string
 						switch t := in.(type) {
@@ -266,34 +165,6 @@ func makeDescMap(recipes []MetricQueryRecipe) map[string]MetricMapNamespace {
 	}
 
 	return metricMap
-}
-
-// convert a string to the corresponding ColumnUsage
-func stringToColumnUsage(s string) (u ColumnUsage, err error) {
-	switch s {
-	case "DISCARD":
-		u = DISCARD
-
-	case "LABEL":
-		u = LABEL
-
-	case "COUNTER":
-		u = COUNTER
-
-	case "GAUGE":
-		u = GAUGE
-
-	case "MAPPEDMETRIC":
-		u = MAPPEDMETRIC
-
-	case "DURATION":
-		u = DURATION
-
-	default:
-		err = fmt.Errorf("wrong ColumnUsage given : %s", s)
-	}
-
-	return
 }
 
 // Convert database.sql types to float64s for Prometheus consumption. Null types are mapped to NaN. string and []byte
@@ -354,12 +225,12 @@ type Exporter struct {
 	dsn             string
 	duration, error prometheus.Gauge
 	totalScrapes    prometheus.Counter
-	recipes         []MetricQueryRecipe
+	recipes         []common.MetricQueryRecipe
 	metricMap       map[string]MetricMapNamespace
 }
 
 // NewExporter returns a new exporter for the provided DSN.
-func NewExporter(dsn string, recipes []MetricQueryRecipe) *Exporter {
+func NewExporter(dsn string, recipes []common.MetricQueryRecipe) *Exporter {
 	return &Exporter{
 		dsn: dsn,
 		duration: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -446,13 +317,13 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 	defer db.Close()
 
 	for _, recipe := range e.recipes {
-		namespace := recipe.basename
+		namespace := recipe.Basename
 		log.Debugln("Querying namespace: ", namespace)
 		func() {
 			// Don't fail on a bad scrape of one metric
-			rows, err := db.Query(recipe.sqlquery)
+			rows, err := db.Query(recipe.Sqlquery)
 			if err != nil {
-				log.Infof("Error running query <%s> for '%s' on database: %v", recipe.sqlquery, namespace, err)
+				log.Infof("Error running query <%s> for '%s' on database: %v", recipe.Sqlquery, namespace, err)
 				e.error.Set(1)
 				return
 			}
@@ -540,13 +411,13 @@ func main() {
 		log.Fatalf("-extend.query-path is a required argument")
 	}
 
-	recipes, err := getRecipes(*queriesPath)
+	recipes, err := config.GetRecipes(*queriesPath)
 	if err != nil {
 		log.Fatalf("error parsing file %q: %v", *queriesPath, err)
 	}
 
 	if *onlyDumpMaps {
-		dumpMaps(recipes)
+		config.DumpMaps(recipes)
 		return
 	}
 
