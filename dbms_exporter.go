@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	_ "github.com/alexbrainman/odbc"
 	_ "github.com/lib/pq"
 	"github.com/ncabatoff/dbms_exporter/common"
 	"github.com/ncabatoff/dbms_exporter/config"
@@ -36,26 +37,28 @@ var (
 		"dumpmaps", false,
 		"Do not run, simply dump the maps.",
 	)
+	driver = flag.String(
+		"driver", "postgres",
+		"DB driver to user, one of postgres or odbc",
+	)
 )
 
 // Metric name parts.
 const (
-	// Namespace for all metrics.
-	namespace = "pg"
 	// Subsystems.
 	exporter = "exporter"
 )
 
 // landingPage contains the HTML served at '/'.
 // TODO: Make this nicer and more informative.
-var landingPage = []byte(`<html>
-<head><title>Postgres exporter</title></head>
+var landingPageFmt = `<html>
+<head><title>%s exporter</title></head>
 <body>
-<h1>Postgres exporter</h1>
+<h1>%s exporter</h1>
 <p><a href='` + *metricPath + `'>Metrics</a></p>
 </body>
 </html>
-`)
+`
 
 // Groups metric maps under a shared set of labels
 type MetricMapNamespace struct {
@@ -73,7 +76,7 @@ type MetricMap struct {
 }
 
 // Turn the MetricMap column mapping into a prometheus descriptor mapping.
-func makeDescMap(recipes []common.MetricQueryRecipe) map[string]MetricMapNamespace {
+func makeDescMap(driver string, recipes []common.MetricQueryRecipe) map[string]MetricMapNamespace {
 	var metricMap = make(map[string]MetricMapNamespace)
 
 	for _, recipe := range recipes {
@@ -167,11 +170,25 @@ func makeDescMap(recipes []common.MetricQueryRecipe) map[string]MetricMapNamespa
 	return metricMap
 }
 
+func dbStringToFloat64(s string) (float64, bool) {
+	result, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		log.Infoln("Could not parse string:", err)
+		return math.NaN(), false
+	}
+
+	return result, true
+}
+
 // Convert database.sql types to float64s for Prometheus consumption. Null types are mapped to NaN. string and []byte
 // types are mapped as NaN and !ok
 func dbToFloat64(t interface{}) (float64, bool) {
 	switch v := t.(type) {
+	case int32:
+		return float64(v), true
 	case int64:
+		return float64(v), true
+	case float32:
 		return float64(v), true
 	case float64:
 		return v, true
@@ -179,19 +196,9 @@ func dbToFloat64(t interface{}) (float64, bool) {
 		return float64(v.Unix()), true
 	case []byte:
 		// Try and convert to string and then parse to a float64
-		strV := string(v)
-		result, err := strconv.ParseFloat(strV, 64)
-		if err != nil {
-			return math.NaN(), false
-		}
-		return result, true
+		return dbStringToFloat64(string(v))
 	case string:
-		result, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			log.Infoln("Could not parse string:", err)
-			return math.NaN(), false
-		}
-		return result, true
+		return dbStringToFloat64(v)
 	case nil:
 		return math.NaN(), true
 	default:
@@ -223,6 +230,7 @@ func dbToString(t interface{}) (string, bool) {
 // Exporter collects Postgres metrics. It implements prometheus.Collector.
 type Exporter struct {
 	dsn                 string
+	driver              string
 	duration            prometheus.Gauge
 	totalScrapes        prometheus.Counter
 	errors_total        prometheus.Counter
@@ -233,40 +241,41 @@ type Exporter struct {
 }
 
 // NewExporter returns a new exporter for the provided DSN.
-func NewExporter(dsn string, recipes []common.MetricQueryRecipe) *Exporter {
+func NewExporter(driver, dsn string, recipes []common.MetricQueryRecipe) *Exporter {
 	return &Exporter{
-		dsn: dsn,
+		driver: driver,
+		dsn:    dsn,
 		duration: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
+			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "last_scrape_duration_seconds",
 			Help:      "Duration of the last scrape of metrics from PostgresSQL.",
 		}),
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
+			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "scrapes_total",
 			Help:      "Total number of times PostgresSQL was scraped for metrics.",
 		}),
 		errors_total: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
+			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "scrape_errors_total",
 			Help:      "How many scrapes failed due to an error",
 		}),
 		open_seconds_total: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
+			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "open_seconds_total",
 			Help:      "How much time was consumed opening DB connections",
 		}),
 		query_seconds_total: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: namespace,
+			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "query_seconds_total",
 			Help:      "How much time was consumed opening DB connections",
 		}, []string{"namespace"}),
-		metricMap: makeDescMap(recipes),
+		metricMap: makeDescMap(driver, recipes),
 		recipes:   recipes,
 	}
 }
@@ -274,14 +283,14 @@ func NewExporter(dsn string, recipes []common.MetricQueryRecipe) *Exporter {
 // Describe implements prometheus.Collector.
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	// We cannot know in advance what metrics the exporter will generate
-	// from Postgres. So we use the poor man's describe method: Run a collect
+	// from the DB. So we use the poor man's describe method: Run a collect
 	// and send the descriptors of all the collected metrics. The problem
-	// here is that we need to connect to the Postgres DB. If it is currently
+	// here is that we need to connect to the DB. If it is currently
 	// unavailable, the descriptors will be incomplete. Since this is a
 	// stand-alone exporter and not used as a library within other code
 	// implementing additional metrics, the worst that can happen is that we
 	// don't detect inconsistent metrics created by this exporter
-	// itself. Also, a change in the monitored Postgres instance may change the
+	// itself. Also, a change in the monitored DB instance may change the
 	// exported metrics during the runtime of the exporter.
 
 	metricCh := make(chan prometheus.Metric)
@@ -310,13 +319,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.query_seconds_total.Collect(ch)
 }
 
-func newDesc(subsystem, name, help string) *prometheus.Desc {
-	return prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, subsystem, name),
-		help, nil, nil,
-	)
-}
-
 func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 	defer func(begun time.Time) {
 		e.duration.Set(time.Since(begun).Seconds())
@@ -325,7 +327,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 	e.totalScrapes.Inc()
 
 	start := time.Now()
-	db, err := sql.Open("postgres", e.dsn)
+	db, err := sql.Open(e.driver, e.dsn)
 	e.open_seconds_total.Add(time.Since(start).Seconds())
 	if err != nil {
 		log.Infoln("Error opening connection to database:", err)
@@ -405,7 +407,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 						ch <- prometheus.MustNewConstMetric(metricMapping.desc, metricMapping.vtype, value, labels...)
 					} else {
 						// Unknown metric. Report as untyped if scan to float64 works, else note an error too.
-						desc := prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), fmt.Sprintf("Unknown metric from %s", namespace), nil, nil)
+						desc := prometheus.NewDesc(fmt.Sprintf("%s_%s_%s", e.driver, namespace, columnName), fmt.Sprintf("Unknown metric from %s", namespace), nil, nil)
 
 						// Its not an error to fail here, since the values are
 						// unexpected anyway.
@@ -446,10 +448,11 @@ func main() {
 		log.Fatal("couldn't find environment variable DATA_SOURCE_NAME")
 	}
 
-	exporter := NewExporter(dsn, recipes)
+	exporter := NewExporter(*driver, dsn, recipes)
 	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricPath, prometheus.Handler())
+	landingPage := []byte(fmt.Sprintf(landingPageFmt, *driver, *driver))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(landingPage)
 	})

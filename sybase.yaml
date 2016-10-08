@@ -1,0 +1,145 @@
+engines:
+  query: "SELECT COUNT(*) AS running FROM master.dbo.sysengines"
+  metrics:
+    - running:
+        usage: "GAUGE"
+        description: "number of Sybase dataserver processes running"
+
+kernel:
+  # @@timeticks gives microseconds / tick,
+  # @@cpu_busy is given in ticks
+  # so @@cpu_busy * @@tickticks / 1000000 gives cpu usage in seconds
+  query: "SELECT CONVERT(REAL, @@cpu_busy) * (CONVERT(REAL, @@timeticks) / 1000000) cpu_busy_seconds_total, 
+                 CONVERT(REAL, @@idle) * (CONVERT(REAL, @@timeticks) / 1000000) cpu_idle_seconds_total, 
+                 @@connections connections, 
+                 @@pack_received tcp_packets_received_total,
+                 @@pack_sent tcp_packets_sent_total,
+                 @@packet_errors tcp_packet_errors_total,
+                 @@total_read disk_reads_total,
+                 @@total_write disk_writes_total,
+                 @@total_errors disk_errors_total"
+  metrics:
+    - cpu_busy_seconds_total:
+        usage: "COUNTER"
+        description: "cpu activity"
+    - cpu_idle_seconds_total:
+        usage: "COUNTER"
+        description: "cpu idle"
+    - connections:
+        usage: "COUNTER"
+        description: "connections formed"
+    - tcp_packets_received_total:
+        usage: "COUNTER"
+        description: "TCP packets received"
+    - tcp_packets_sent_total:
+        usage: "COUNTER"
+        description: "TCP packets sent"
+    - tcp_packet_errors_total:
+        usage: "COUNTER"
+        description: "TCP packet errors"
+    - disk_reads_total:
+        usage: "COUNTER"
+        description: "disk reads"
+    - disk_writes_total:
+        usage: "COUNTER"
+        description: "disk writes"
+    - disk_errors_total:
+        usage: "COUNTER"
+        description: "disk errors"
+    - microseconds_per_tick:
+        usage: "GAUGE"
+        description: "number of microseconds per tick"
+
+syslogins:
+  query: "SELECT name AS dbuser, totcpu, totio FROM master.dbo.syslogins"
+  metrics:
+    - dbuser:
+        usage: "LABEL"
+        description: "DB username"
+    - totcpu:
+        usage: "COUNTER"
+        description: "cpu usage"
+    - totio:
+        usage: "COUNTER"
+        description: "I/O usage"
+
+spid_count_special_users:
+  query: "SELECT cmd AS sysproc, 1 AS conns
+            FROM master.dbo.sysprocesses
+           WHERE suid = 0"
+  metrics:
+    - sysproc:
+        usage: "LABEL"
+        description: "system process"
+    - conns:
+        usage: "GAUGE"
+        description: "1 if running"
+
+spid_count_by_status:
+  query: "SELECT status, count(*) AS conns FROM master.dbo.sysprocesses GROUP BY status"
+  metrics:
+    - status:
+        usage: "LABEL"
+        description: "Status of connections"
+    - conns:
+        usage: "GAUGE"
+        description: "Count of connections with that status"
+
+spid_count_by_user:
+  query: "SELECT l.name AS dbuser, count(*) AS conns 
+            FROM master.dbo.sysprocesses p, master.dbo.syslogins l
+           WHERE p.suid = l.suid
+           GROUP BY l.name"
+  metrics:
+    - dbuser:
+        usage: "LABEL"
+        description: "DB username"
+    - conns:
+        usage: "GAUGE"
+        description: "Count of connections for that username"
+
+spid_count_blocked_by_user:
+  query: "SELECT l.name AS dbuser, count(*) AS conns 
+            FROM master.dbo.sysprocesses p, master.dbo.syslogins l
+           WHERE p.suid = l.suid AND blocked != 0
+           GROUP BY l.name"
+  metrics:
+    - dbuser:
+        usage: "LABEL"
+        description: "DB username"
+    - conns:
+        usage: "GAUGE"
+        description: "Count of blocked connections for that username"
+
+syslogshold:
+  query: "SELECT d.name AS db_name, l.name AS dbuser, 
+                 MAX(datediff(ss, starttime, getdate())) AS held_seconds
+            FROM master.dbo.syslogshold h, master.dbo.sysdatabases d,
+                 master.dbo.sysprocesses p, master.dbo.syslogins l
+           WHERE h.dbid=d.dbid AND h.spid = p.spid AND p.suid = l.suid
+           GROUP BY d.name, l.name"
+  metrics:
+    - db_name:
+        usage: "LABEL"
+        description: "db affected"
+    - dbuser:
+        usage: "LABEL"
+        description: "db username responsible for hold"
+    - held_seconds:
+        usage: "GAUGE"
+        description: "how many seconds the hold has been outstanding"
+
+config:
+  query: "SELECT name, value FROM master.dbo.sysconfigures WHERE name IN (
+            'number of user connections',
+            'time slice',
+            'procedure cache percent',
+            'number of open objects')"
+  metrics:
+    - name:
+        usage: "LABEL"
+        description: "config option"
+    - value:
+        usage: "GAUGE"
+        description: "config setting"
+

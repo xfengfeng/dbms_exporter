@@ -109,3 +109,15 @@ AS
 GRANT SELECT ON postgres_exporter.pg_stat_replication TO postgres_exporter;
 GRANT SELECT ON postgres_exporter.pg_stat_activity TO postgres_exporter;
 ```
+
+## Sybase via ODBC & FreeTDS
+
+Ubuntu:
+
+  apt-get install tdsodbc freetds-dev unixodbc-dev
+  odbcinst -i -d -f /usr/share/tdsodbc/odbcinst.ini
+
+Example DSN:
+
+DATA_SOURCE_NAME="driver=freetds;server=dbhostname;TDS_Version=5.0;uid=username;pwd=password;port=7100" ./dbms_exporter -driver odbc -queryfile sybase.yaml 
+
