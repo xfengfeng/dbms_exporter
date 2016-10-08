@@ -11,7 +11,7 @@ VERSIONS=( \
 
 smoketest_postgres() {
     local version=$1
-    local CONTAINER_NAME=postgres_exporter-test-smoke
+    local CONTAINER_NAME=dbms_exporter-test-smoke
     local TIMEOUT=30
     local IMAGE_NAME=postgres
     
@@ -32,7 +32,7 @@ smoketest_postgres() {
         sleep 1
     done
 
-    DATA_SOURCE_NAME="postgresql://postgres:password@localhost:55432/?sslmode=disable" ./postgres_exporter &
+    DATA_SOURCE_NAME="postgresql://postgres:password@localhost:55432/?sslmode=disable" ./dbms_exporter &
     exporter_pid=$!
     local DAEMON_WAIT_START=$(date +%s)
     while ! nc -z localhost 9113 ; do

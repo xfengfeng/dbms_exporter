@@ -1,5 +1,5 @@
 .build
-postgres_exporter
+dbms_exporter
 *.tar.gz
 *.test
 *-stamp

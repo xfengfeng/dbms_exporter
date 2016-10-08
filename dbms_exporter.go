@@ -29,8 +29,8 @@ var (
 		"Path under which to expose metrics.",
 	)
 	queriesPath = flag.String(
-		"extend.query-path", "",
-		"Path to custom queries to run.",
+		"queryfile", "",
+		"File with queries to run.",
 	)
 	onlyDumpMaps = flag.Bool(
 		"dumpmaps", false,

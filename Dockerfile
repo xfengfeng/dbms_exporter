@@ -1,7 +1,8 @@
-FROM scratch
+FROM debian:jessie
 
-COPY postgres_exporter /postgres_exporter
+COPY dbms_exporter /dbms_exporter
+COPY queries.yaml /queries.yaml
 
 EXPOSE 9113
 
-ENTRYPOINT [ "/postgres_exporter" ]
+ENTRYPOINT [ "/dbms_exporter", "-queryfile", "/queries.yaml" ]

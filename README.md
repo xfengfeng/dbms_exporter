@@ -11,7 +11,7 @@ This package is available for Docker:
 # Start an example database
 docker run --net=host -it --rm -e POSTGRES_PASSWORD=password postgres
 # Connect to it
-docker run -e DATA_SOURCE_NAME="postgresql://postgres:password@localhost:5432/?sslmode=disable" -p 9113:9113 wrouesnel/postgres_exporter
+docker run -e DATA_SOURCE_NAME="postgresql://postgres:password@localhost:5432/?sslmode=disable" -p 9113:9113 ncabatoff/dbms_exporter
 ```
 
 ## Building and running
@@ -38,6 +38,8 @@ Name               | Description
 -------------------|------------
 web.listen-address | Address to listen on for web interface and telemetry.
 web.telemetry-path | Path under which to expose metrics.
+queryfile          | Path to file containing the queries to run.
+dumpmaps           | Do not run, simply dump the queries read from queryfile.
 
 ### Setting the Postgres server's data source name
 
@@ -67,7 +69,7 @@ rich self-documenting metrics for the exporter.
 
 ### Adding new metrics via a config file
 
-The -extend.query-path command-line argument specifies a YAML file containing additional queries to run.
+The -queryfile command-line argument specifies a YAML file containing the queries to run.
 Some examples are provided in [queries.yaml](queries.yaml).
 
 ### Running as non-superuser
