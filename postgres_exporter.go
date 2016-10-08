@@ -222,11 +222,14 @@ func dbToString(t interface{}) (string, bool) {
 
 // Exporter collects Postgres metrics. It implements prometheus.Collector.
 type Exporter struct {
-	dsn             string
-	duration, error prometheus.Gauge
-	totalScrapes    prometheus.Counter
-	recipes         []common.MetricQueryRecipe
-	metricMap       map[string]MetricMapNamespace
+	dsn                 string
+	duration            prometheus.Gauge
+	totalScrapes        prometheus.Counter
+	errors_total        prometheus.Counter
+	open_seconds_total  prometheus.Counter
+	query_seconds_total *prometheus.CounterVec
+	recipes             []common.MetricQueryRecipe
+	metricMap           map[string]MetricMapNamespace
 }
 
 // NewExporter returns a new exporter for the provided DSN.
@@ -245,12 +248,24 @@ func NewExporter(dsn string, recipes []common.MetricQueryRecipe) *Exporter {
 			Name:      "scrapes_total",
 			Help:      "Total number of times PostgresSQL was scraped for metrics.",
 		}),
-		error: prometheus.NewGauge(prometheus.GaugeOpts{
+		errors_total: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: exporter,
-			Name:      "last_scrape_error",
-			Help:      "Whether the last scrape of metrics from PostgreSQL resulted in an error (1 for error, 0 for success).",
+			Name:      "scrape_errors_total",
+			Help:      "How many scrapes failed due to an error",
 		}),
+		open_seconds_total: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: exporter,
+			Name:      "open_seconds_total",
+			Help:      "How much time was consumed opening DB connections",
+		}),
+		query_seconds_total: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: exporter,
+			Name:      "query_seconds_total",
+			Help:      "How much time was consumed opening DB connections",
+		}, []string{"namespace"}),
 		metricMap: makeDescMap(recipes),
 		recipes:   recipes,
 	}
@@ -290,7 +305,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- e.duration
 	ch <- e.totalScrapes
-	ch <- e.error
+	ch <- e.errors_total
+	ch <- e.open_seconds_total
+	e.query_seconds_total.Collect(ch)
 }
 
 func newDesc(subsystem, name, help string) *prometheus.Desc {
@@ -305,13 +322,14 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 		e.duration.Set(time.Since(begun).Seconds())
 	}(time.Now())
 
-	e.error.Set(0)
 	e.totalScrapes.Inc()
 
+	start := time.Now()
 	db, err := sql.Open("postgres", e.dsn)
+	e.open_seconds_total.Add(time.Since(start).Seconds())
 	if err != nil {
 		log.Infoln("Error opening connection to database:", err)
-		e.error.Set(1)
+		e.errors_total.Inc()
 		return
 	}
 	defer db.Close()
@@ -321,10 +339,12 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 		log.Debugln("Querying namespace: ", namespace)
 		func() {
 			// Don't fail on a bad scrape of one metric
+			qstart := time.Now()
 			rows, err := db.Query(recipe.SqlQuery)
+			e.query_seconds_total.WithLabelValues(namespace).Add(time.Since(qstart).Seconds())
 			if err != nil {
 				log.Infof("Error running query <%s> for '%s' on database: %v", recipe.SqlQuery, namespace, err)
-				e.error.Set(1)
+				e.errors_total.Inc()
 				return
 			}
 			defer rows.Close()
@@ -333,7 +353,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 			columnNames, err = rows.Columns()
 			if err != nil {
 				log.Infoln("Error retrieving column list for: ", namespace, err)
-				e.error.Set(1)
+				e.errors_total.Inc()
 				return
 			}
 
@@ -353,7 +373,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 				err = rows.Scan(scanArgs...)
 				if err != nil {
 					log.Infoln("Error retrieving rows:", namespace, err)
-					e.error.Set(1)
+					e.errors_total.Inc()
 					return
 				}
 
@@ -376,7 +396,7 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 
 						value, ok := dbToFloat64(columnData[idx])
 						if !ok {
-							e.error.Set(1)
+							e.errors_total.Inc()
 							log.Errorln("Unexpected error parsing column: ", namespace, columnName, columnData[idx])
 							continue
 						}
