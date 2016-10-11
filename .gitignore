@@ -5,3 +5,4 @@ dbms_exporter
 *-stamp
 .idea
 *.iml
+.*.sw?

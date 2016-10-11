@@ -1,0 +1,59 @@
+dbsize:
+  rangeover: "SELECT name AS db_name FROM master.dbo.sysdatabases
+         WHERE name NOT IN ('master', 'defaultdb', 'model', 'sybsecurity', 'sybsystemprocs', 'tempdb')"
+  queries: 
+    - "sp_helpdb {{.}}"
+  resultsets:
+    - discard:
+    - metrics:
+      - db_name:
+          usage: "LABEL"
+          description: "database name"
+      - device_fragments:
+          usage: "LABEL"
+          description: "short device name"
+      - size:
+          usage: "GAUGE"
+          regexp: ^([\d.]+)\s+MB$
+          description: "size in MB"
+      - usage:
+          usage: "LABEL"
+          description: "data or log"
+      - "free kbytes":
+          usage: "GAUGE"
+          description: "free space in KB"
+
+tablesize:
+  rangeover: "SELECT name AS db_name FROM master.dbo.sysdatabases
+         WHERE name NOT IN ('master', 'defaultdb', 'model', 'sybsecurity', 'sybsystemprocs', 'tempdb')"
+  queries:
+    - "USE {{.}}"
+    - "SELECT o.name AS table_name,
+          SUM(rowcnt(i.doampg)) AS rowtotal,
+          2048*SUM(data_pgs(i.id, i.doampg)) AS heap_size_bytes,
+          2048*SUM(data_pgs(i.id, i.ioampg)) AS index_size_bytes,
+          2048*SUM(((reserved_pgs(i.id, i.doampg) + reserved_pgs(i.id, i.ioampg))
+            - (data_pgs(i.id, i.doampg) + data_pgs(i.id, i.ioampg)))) AS unused_size_bytes
+        FROM sysobjects o, sysindexes i WHERE o.id = i.id AND o.type = 'U' GROUP BY o.name"
+    - "USE master"
+  resultsets:
+    - metrics:
+      - db_name:
+          usage: "LABEL"
+          description: "db name"
+      - table_name:
+          usage: "LABEL"
+          description: "table name"
+      - rowtotal:
+          usage: "GAUGE"
+          description: "row estimate"
+      - heap_size_bytes:
+          usage: "GAUGE"
+          description: "usage excluding indexes"
+      - index_size_bytes:
+          usage: "GAUGE"
+          description: "index space usage"
+      - unused_size_bytes:
+          usage: "GAUGE"
+          description: "wasted space"
+

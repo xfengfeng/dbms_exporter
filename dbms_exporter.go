@@ -1,19 +1,18 @@
 package main
 
 import (
-	"database/sql"
 	"flag"
 	"fmt"
 	"math"
 	"net/http"
 	"os"
-	"strconv"
+	"strings"
 	"time"
 
-	_ "github.com/alexbrainman/odbc"
-	_ "github.com/lib/pq"
 	"github.com/ncabatoff/dbms_exporter/common"
 	"github.com/ncabatoff/dbms_exporter/config"
+	"github.com/ncabatoff/dbms_exporter/db"
+	"github.com/ncabatoff/dbms_exporter/recipes"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
 )
@@ -39,7 +38,12 @@ var (
 	)
 	driver = flag.String(
 		"driver", "postgres",
-		"DB driver to user, one of postgres or odbc",
+		"DB driver to user, one of ("+strings.Join(db.Drivers(), ",")+
+			"); sybase is the same as freetds except for the prefix of generated metrics)",
+	)
+	persistentConnection = flag.Bool(
+		"persistent.connection", false,
+		"keep a DB connection open rather than opening a new one for each scrape",
 	)
 )
 
@@ -49,7 +53,7 @@ const (
 	exporter = "exporter"
 )
 
-// landingPage contains the HTML served at '/'.
+// landingPageFmt contains the HTML served at '/'.
 // TODO: Make this nicer and more informative.
 var landingPageFmt = `<html>
 <head><title>%s exporter</title></head>
@@ -60,188 +64,156 @@ var landingPageFmt = `<html>
 </html>
 `
 
-// Groups metric maps under a shared set of labels
-type MetricMapNamespace struct {
-	labels         []string             // Label names for this namespace
-	columnMappings map[string]MetricMap // Column mappings in this namespace
-}
-
 // Stores the prometheus metric description which a given column will be mapped
 // to by the collector
 type MetricMap struct {
 	discard    bool                              // Should metric be discarded during mapping?
 	vtype      prometheus.ValueType              // Prometheus valuetype
 	desc       *prometheus.Desc                  // Prometheus descriptor
-	conversion func(interface{}) (float64, bool) // Conversion function to turn PG result into float64
+	conversion func(interface{}) (float64, bool) // Conversion function to turn DB result into float64
+	fixedval   string
+}
+
+// Groups metric maps under a shared set of labels
+type MetricMapNamespace struct {
+	labels         []string             // Label names for this namespace
+	columnMappings map[string]MetricMap // Column mappings in this namespace
+}
+
+func makeDescMap(metricName string, resultMap recipes.ResultMap, recipe recipes.MetricQueryRecipe) MetricMapNamespace {
+	thisMap := make(map[string]MetricMap)
+
+	// Get the constant labels
+	var variableLabels []string
+	var constLabels = make(prometheus.Labels)
+	for columnName, columnMapping := range resultMap {
+		if columnMapping.Usage == common.LABEL {
+			variableLabels = append(variableLabels, columnName)
+		} else if columnMapping.Usage == common.FIXED {
+			constLabels[columnName] = columnMapping.Fixedval
+		}
+	}
+
+	newDesc := func(colName, desc string) *prometheus.Desc {
+		return prometheus.NewDesc(fmt.Sprintf("%s_%s", metricName, colName), desc, variableLabels, constLabels)
+	}
+
+	for columnName, columnMapping := range resultMap {
+		switch columnMapping.Usage {
+		case common.DISCARD, common.LABEL:
+			thisMap[columnName] = MetricMap{
+				discard: true,
+			}
+		case common.COUNTER:
+			regexp := columnMapping.Regexp
+			thisMap[columnName] = MetricMap{
+				vtype: prometheus.CounterValue,
+				desc:  newDesc(columnName, columnMapping.Description),
+				conversion: func(in interface{}) (float64, bool) {
+					return db.ToFloat64(in, regexp)
+				},
+			}
+		case common.GAUGE:
+			regexp := columnMapping.Regexp
+			thisMap[columnName] = MetricMap{
+				vtype: prometheus.GaugeValue,
+				desc:  newDesc(columnName, columnMapping.Description),
+				conversion: func(in interface{}) (float64, bool) {
+					return db.ToFloat64(in, regexp)
+				},
+			}
+		case common.MAPPEDMETRIC:
+			thisMap[columnName] = MetricMap{
+				vtype: prometheus.GaugeValue,
+				desc:  newDesc(columnName, columnMapping.Description),
+				conversion: func(in interface{}) (float64, bool) {
+					text, ok := in.(string)
+					if !ok {
+						return math.NaN(), false
+					}
+
+					val, ok := columnMapping.Mapping[text]
+					if !ok {
+						return math.NaN(), false
+					}
+					return val, true
+				},
+			}
+		case common.DURATION:
+			fullName := fmt.Sprintf("%s_milliseconds", columnName)
+			thisMap[columnName] = MetricMap{
+				vtype:      prometheus.GaugeValue,
+				desc:       newDesc(fullName, columnMapping.Description),
+				conversion: convertDuration,
+			}
+		}
+	}
+	return MetricMapNamespace{variableLabels, thisMap}
+}
+
+func convertDuration(in interface{}) (float64, bool) {
+	var durationString string
+	switch t := in.(type) {
+	case []byte:
+		durationString = string(t)
+	case string:
+		durationString = t
+	default:
+		log.Errorln("DURATION conversion metric was not a string")
+		return math.NaN(), false
+	}
+
+	if durationString == "-1" {
+		return math.NaN(), false
+	}
+
+	d, err := time.ParseDuration(durationString)
+	if err != nil {
+		return math.NaN(), false
+	}
+	return float64(d / time.Millisecond), true
 }
 
 // Turn the MetricMap column mapping into a prometheus descriptor mapping.
-func makeDescMap(driver string, recipes []common.MetricQueryRecipe) map[string]MetricMapNamespace {
+func makeDescMaps(recipes []recipes.MetricQueryRecipe) map[string]MetricMapNamespace {
 	var metricMap = make(map[string]MetricMapNamespace)
 
 	for _, recipe := range recipes {
-		namespace := recipe.Basename
-		thisMap := make(map[string]MetricMap)
+		namespace := recipe.GetNamespace()
 
-		// Get the constant labels
-		var constLabels []string
-		for columnName, columnMapping := range recipe.ResultMap {
-			if columnMapping.Usage == common.LABEL {
-				constLabels = append(constLabels, columnName)
+		for _, rm := range recipe.GetResultMaps() {
+			if rm.Name == "discard" {
+				continue
 			}
-		}
-
-		for columnName, columnMapping := range recipe.ResultMap {
-			switch columnMapping.Usage {
-			case common.DISCARD, common.LABEL:
-				thisMap[columnName] = MetricMap{
-					discard: true,
-					conversion: func(in interface{}) (float64, bool) {
-						return math.NaN(), true
-					},
-				}
-			case common.COUNTER:
-				thisMap[columnName] = MetricMap{
-					vtype: prometheus.CounterValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.Description, constLabels, nil),
-					conversion: func(in interface{}) (float64, bool) {
-						return dbToFloat64(in)
-					},
-				}
-			case common.GAUGE:
-				thisMap[columnName] = MetricMap{
-					vtype: prometheus.GaugeValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.Description, constLabels, nil),
-					conversion: func(in interface{}) (float64, bool) {
-						return dbToFloat64(in)
-					},
-				}
-			case common.MAPPEDMETRIC:
-				thisMap[columnName] = MetricMap{
-					vtype: prometheus.GaugeValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s", namespace, columnName), columnMapping.Description, constLabels, nil),
-					conversion: func(in interface{}) (float64, bool) {
-						text, ok := in.(string)
-						if !ok {
-							return math.NaN(), false
-						}
-
-						val, ok := columnMapping.Mapping[text]
-						if !ok {
-							return math.NaN(), false
-						}
-						return val, true
-					},
-				}
-			case common.DURATION:
-				thisMap[columnName] = MetricMap{
-					vtype: prometheus.GaugeValue,
-					desc:  prometheus.NewDesc(fmt.Sprintf("%s_%s_milliseconds", namespace, columnName), columnMapping.Description, constLabels, nil),
-					conversion: func(in interface{}) (float64, bool) {
-						var durationString string
-						switch t := in.(type) {
-						case []byte:
-							durationString = string(t)
-						case string:
-							durationString = t
-						default:
-							log.Errorln("DURATION conversion metric was not a string")
-							return math.NaN(), false
-						}
-
-						if durationString == "-1" {
-							return math.NaN(), false
-						}
-
-						d, err := time.ParseDuration(durationString)
-						if err != nil {
-							log.Errorln("Failed converting result to metric:", columnName, in, err)
-							return math.NaN(), false
-						}
-						return float64(d / time.Millisecond), true
-					},
-				}
+			metricName := namespace
+			if rm.Name != "metrics" {
+				metricName = metricName + "_" + rm.Name
 			}
-		}
 
-		metricMap[namespace] = MetricMapNamespace{constLabels, thisMap}
+			metricMap[metricName] = makeDescMap(metricName, rm.ResultMap, recipe)
+		}
 	}
 
 	return metricMap
 }
 
-func dbStringToFloat64(s string) (float64, bool) {
-	result, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		log.Infoln("Could not parse string:", err)
-		return math.NaN(), false
-	}
-
-	return result, true
-}
-
-// Convert database.sql types to float64s for Prometheus consumption. Null types are mapped to NaN. string and []byte
-// types are mapped as NaN and !ok
-func dbToFloat64(t interface{}) (float64, bool) {
-	switch v := t.(type) {
-	case int32:
-		return float64(v), true
-	case int64:
-		return float64(v), true
-	case float32:
-		return float64(v), true
-	case float64:
-		return v, true
-	case time.Time:
-		return float64(v.Unix()), true
-	case []byte:
-		// Try and convert to string and then parse to a float64
-		return dbStringToFloat64(string(v))
-	case string:
-		return dbStringToFloat64(v)
-	case nil:
-		return math.NaN(), true
-	default:
-		return math.NaN(), false
-	}
-}
-
-// Convert database.sql to string for Prometheus labels. Null types are mapped to empty strings.
-func dbToString(t interface{}) (string, bool) {
-	switch v := t.(type) {
-	case int64:
-		return fmt.Sprintf("%v", v), true
-	case float64:
-		return fmt.Sprintf("%v", v), true
-	case time.Time:
-		return fmt.Sprintf("%v", v.Unix()), true
-	case nil:
-		return "", true
-	case []byte:
-		// Try and convert to string
-		return string(v), true
-	case string:
-		return v, true
-	default:
-		return "", false
-	}
-}
-
-// Exporter collects Postgres metrics. It implements prometheus.Collector.
+// Exporter collects DB metrics. It implements prometheus.Collector.
 type Exporter struct {
-	dsn                 string
-	driver              string
-	duration            prometheus.Gauge
-	totalScrapes        prometheus.Counter
-	errors_total        prometheus.Counter
-	open_seconds_total  prometheus.Counter
-	query_seconds_total *prometheus.CounterVec
-	recipes             []common.MetricQueryRecipe
-	metricMap           map[string]MetricMapNamespace
+	dsn                  string
+	driver               string
+	persistentConnection bool
+	conn                 db.Conn
+	duration             prometheus.Gauge
+	totalScrapes         prometheus.Counter
+	errors_total         prometheus.Counter
+	open_seconds_total   prometheus.Counter
+	query_seconds_total  *prometheus.CounterVec
+	metricMap            map[string]MetricMapNamespace
+	recipes              []recipes.MetricQueryRecipe
 }
 
 // NewExporter returns a new exporter for the provided DSN.
-func NewExporter(driver, dsn string, recipes []common.MetricQueryRecipe) *Exporter {
+func NewExporter(driver, dsn string, recipes []recipes.MetricQueryRecipe, persistentConn bool) *Exporter {
 	return &Exporter{
 		driver: driver,
 		dsn:    dsn,
@@ -249,13 +221,13 @@ func NewExporter(driver, dsn string, recipes []common.MetricQueryRecipe) *Export
 			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "last_scrape_duration_seconds",
-			Help:      "Duration of the last scrape of metrics from PostgresSQL.",
+			Help:      "Duration of the last scrape of metrics from DB",
 		}),
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: driver,
 			Subsystem: exporter,
 			Name:      "scrapes_total",
-			Help:      "Total number of times PostgresSQL was scraped for metrics.",
+			Help:      "Total number of times the DB was scraped for metrics.",
 		}),
 		errors_total: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: driver,
@@ -275,8 +247,9 @@ func NewExporter(driver, dsn string, recipes []common.MetricQueryRecipe) *Export
 			Name:      "query_seconds_total",
 			Help:      "How much time was consumed opening DB connections",
 		}, []string{"namespace"}),
-		metricMap: makeDescMap(driver, recipes),
-		recipes:   recipes,
+		metricMap:            makeDescMaps(recipes),
+		recipes:              recipes,
+		persistentConnection: persistentConn,
 	}
 }
 
@@ -319,6 +292,93 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.query_seconds_total.Collect(ch)
 }
 
+func (e *Exporter) scrapeRecipe(ch chan<- prometheus.Metric, conn db.Conn, recipe recipes.MetricQueryRecipe) {
+	namespace := recipe.GetNamespace()
+	log.Debugln("Querying namespace: ", namespace)
+	qstart := time.Now()
+	srss, err := recipe.Run(conn)
+	e.query_seconds_total.WithLabelValues(namespace).Add(time.Since(qstart).Seconds())
+
+	if err != nil {
+		log.Infof("Error running query for %q: %v", namespace, err)
+		e.errors_total.Inc()
+		if e.conn != nil {
+			e.conn.Close()
+		}
+		e.conn = nil
+		return
+	}
+
+	rms := recipe.GetResultMaps()
+	for i, srs := range srss {
+		log.Debugf("handling resultset %d with %d rows", i, len(srs.Rows))
+		rm := rms[i]
+		// handle the 'discard' scenario by skipping this resultset
+		if rm.ShouldSkip() {
+			continue
+		}
+		ns := namespace
+		if rm.Name != "metrics" {
+			ns = ns + "_" + rm.Name
+		}
+		e.scrapeResultSet(ch, ns, srs, rm.ResultMap)
+	}
+}
+
+func (e *Exporter) scrapeResultSet(ch chan<- prometheus.Metric, namespace string, srs db.ScannedResultSet, rm recipes.ResultMap) {
+	// Make a lookup map for the column indices
+	var columnIdx = make(map[string]int, len(srs.Colnames))
+	for i, n := range srs.Colnames {
+		columnIdx[n] = i
+	}
+
+	for _, row := range srs.Rows {
+		// Get the label values for this row
+		mapping := e.metricMap[namespace]
+		var labels = make([]string, len(mapping.labels))
+		for idx, columnName := range mapping.labels {
+			labels[idx], _ = db.ToString(row[columnIdx[columnName]])
+		}
+
+		// Loop over column names, and match to scan data. Unknown columns
+		// will be filled with an untyped metric number *if* they can be
+		// converted to float64s. NULLs are allowed and treated as NaN.
+		for idx, columnName := range srs.Colnames {
+			columnName = strings.Replace(columnName, " ", "_", -1)
+			if metricMapping, ok := mapping.columnMappings[columnName]; ok {
+				// Is this a metricy metric?
+				if metricMapping.discard {
+					continue
+				}
+
+				value, ok := metricMapping.conversion(row[idx])
+				if !ok {
+					e.errors_total.Inc()
+					log.Errorln("Unexpected error parsing column: ", namespace, columnName, row[idx])
+					continue
+				}
+
+				// Generate the metric
+				ch <- prometheus.MustNewConstMetric(metricMapping.desc, metricMapping.vtype, value, labels...)
+			} else {
+				log.Debugf("unknown metric %q in namespace %q, labels: %v", columnName, namespace, labels)
+				// Unknown metric. Report as untyped if scan to float64 works, else note an error too.
+				desc := prometheus.NewDesc(fmt.Sprintf("%s_%s_%s", e.driver, namespace, columnName), fmt.Sprintf("Unknown metric from %s", namespace), nil, nil)
+
+				// Its not an error to fail here, since the values are
+				// unexpected anyway.
+				value, ok := db.ToFloat64(row[idx], nil)
+				if !ok {
+					log.Warnln("Unparseable column type - discarding: ", namespace, columnName)
+					continue
+				}
+
+				ch <- prometheus.MustNewConstMetric(desc, prometheus.UntypedValue, value)
+			}
+		}
+	}
+}
+
 func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 	defer func(begun time.Time) {
 		e.duration.Set(time.Since(begun).Seconds())
@@ -326,120 +386,63 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 
 	e.totalScrapes.Inc()
 
-	start := time.Now()
-	db, err := sql.Open(e.driver, e.dsn)
-	e.open_seconds_total.Add(time.Since(start).Seconds())
-	if err != nil {
-		log.Infoln("Error opening connection to database:", err)
-		e.errors_total.Inc()
-		return
+	conn := e.conn
+
+	if conn == db.Conn(nil) {
+		start := time.Now()
+		var err error
+		conn, err = db.Open(e.driver, e.dsn)
+		if err != nil {
+			log.Infof("Error opening connection to %s database: %v", e.driver, err)
+			e.errors_total.Inc()
+			return
+		}
+		if e.persistentConnection {
+			e.conn = conn
+		} else {
+			defer conn.Close()
+		}
+		e.open_seconds_total.Add(time.Since(start).Seconds())
 	}
-	defer db.Close()
 
 	for _, recipe := range e.recipes {
-		namespace := recipe.Basename
-		log.Debugln("Querying namespace: ", namespace)
-		func() {
-			// Don't fail on a bad scrape of one metric
-			qstart := time.Now()
-			rows, err := db.Query(recipe.SqlQuery)
-			e.query_seconds_total.WithLabelValues(namespace).Add(time.Since(qstart).Seconds())
-			if err != nil {
-				log.Infof("Error running query <%s> for '%s' on database: %v", recipe.SqlQuery, namespace, err)
-				e.errors_total.Inc()
-				return
-			}
-			defer rows.Close()
-
-			var columnNames []string
-			columnNames, err = rows.Columns()
-			if err != nil {
-				log.Infoln("Error retrieving column list for: ", namespace, err)
-				e.errors_total.Inc()
-				return
-			}
-
-			// Make a lookup map for the column indices
-			var columnIdx = make(map[string]int, len(columnNames))
-			for i, n := range columnNames {
-				columnIdx[n] = i
-			}
-
-			var columnData = make([]interface{}, len(columnNames))
-			var scanArgs = make([]interface{}, len(columnNames))
-			for i := range columnData {
-				scanArgs[i] = &columnData[i]
-			}
-
-			for rows.Next() {
-				err = rows.Scan(scanArgs...)
-				if err != nil {
-					log.Infoln("Error retrieving rows:", namespace, err)
-					e.errors_total.Inc()
-					return
-				}
-
-				// Get the label values for this row
-				mapping := e.metricMap[namespace]
-				var labels = make([]string, len(mapping.labels))
-				for idx, columnName := range mapping.labels {
-					labels[idx], _ = dbToString(columnData[columnIdx[columnName]])
-				}
-
-				// Loop over column names, and match to scan data. Unknown columns
-				// will be filled with an untyped metric number *if* they can be
-				// converted to float64s. NULLs are allowed and treated as NaN.
-				for idx, columnName := range columnNames {
-					if metricMapping, ok := mapping.columnMappings[columnName]; ok {
-						// Is this a metricy metric?
-						if metricMapping.discard {
-							continue
-						}
-
-						value, ok := dbToFloat64(columnData[idx])
-						if !ok {
-							e.errors_total.Inc()
-							log.Errorln("Unexpected error parsing column: ", namespace, columnName, columnData[idx])
-							continue
-						}
-
-						// Generate the metric
-						ch <- prometheus.MustNewConstMetric(metricMapping.desc, metricMapping.vtype, value, labels...)
-					} else {
-						// Unknown metric. Report as untyped if scan to float64 works, else note an error too.
-						desc := prometheus.NewDesc(fmt.Sprintf("%s_%s_%s", e.driver, namespace, columnName), fmt.Sprintf("Unknown metric from %s", namespace), nil, nil)
-
-						// Its not an error to fail here, since the values are
-						// unexpected anyway.
-						value, ok := dbToFloat64(columnData[idx])
-						if !ok {
-							log.Warnln("Unparseable column type - discarding: ", namespace, columnName, err)
-							continue
-						}
-
-						ch <- prometheus.MustNewConstMetric(desc, prometheus.UntypedValue, value, labels...)
-					}
-				}
-
-			}
-		}()
+		e.scrapeRecipe(ch, conn, recipe)
 	}
 }
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, usage)
+	}
 	flag.Parse()
 
 	if *queriesPath == "" {
-		log.Fatalf("-extend.query-path is a required argument")
+		log.Fatalf("-queryfile is a required argument")
 	}
 
-	recipes, err := config.ReadRecipesFile(*queriesPath)
+	rcps, err := config.ReadRecipesFile(*queriesPath, *driver)
 	if err != nil {
 		log.Fatalf("error parsing file %q: %v", *queriesPath, err)
 	}
+	if *driver == "sybase" {
+		*driver = "freetds"
+	}
+
+	found := false
+	for _, d := range db.Drivers() {
+		if d == *driver {
+			found = true
+			break
+		}
+	}
+	if !found {
+		log.Fatalf("driver %q not supported in this build", *driver)
+	}
 
 	if *onlyDumpMaps {
-		config.DumpMaps(recipes)
+		recipes.DumpMaps(rcps)
 		return
 	}
 
@@ -448,7 +451,7 @@ func main() {
 		log.Fatal("couldn't find environment variable DATA_SOURCE_NAME")
 	}
 
-	exporter := NewExporter(*driver, dsn, recipes)
+	exporter := NewExporter(*driver, dsn, rcps, *persistentConnection)
 	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricPath, prometheus.Handler())
@@ -460,3 +463,13 @@ func main() {
 	log.Infof("Starting Server: %s", *listenAddress)
 	log.Fatal(http.ListenAndServe(*listenAddress, nil))
 }
+
+var usage = `
+The DATA_SOURCE_NAME enviroment variable specifies connection details.  Examples:
+	
+  Sybase FreeTDS example (driver=freetds):
+	compatibility_mode=sybase;user=myuser;pwd=mypassword;server=myhostname
+
+  PostgreSQL example (driver=postgres):
+	postgres://myuser@myhost:5432/?sslmode=disable&dbname=postgres&client_encoding=UTF8
+`
