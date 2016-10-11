@@ -94,6 +94,7 @@ func (mqrs *MetricQueryRecipeSimple) runQueries(conn db.Conn) ([]db.ScannedResul
 		if err != nil {
 			return nil, fmt.Errorf("Error running query <%s> on database: %v", sql, err)
 		}
+		log.Debugln("got results", srss)
 
 		accsrs = append(accsrs, srss...)
 	}
@@ -113,43 +114,44 @@ type MetricQueryRecipeTemplated struct {
 // getRange returns the list of strings to iterate over based on the results
 // of the rangeover query.  The query should yield a one-column resultset,
 // the rows of which are returned as a list of strings produced by db.ToString().
-func (mqrt *MetricQueryRecipeTemplated) getRange(conn db.Conn) ([]string, error) {
+func (mqrt *MetricQueryRecipeTemplated) getRange(conn db.Conn) (string, []string, error) {
 	srss, err := conn.Query(mqrt.Rangequery)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if len(srss) != 1 {
-		return nil, fmt.Errorf("rangeover query yielded %d resultsets rather than 1", len(srss))
+		return "", nil, fmt.Errorf("rangeover query yielded %d resultsets rather than 1", len(srss))
 	}
 
 	srs := srss[0]
 	if len(srs.Colnames) != 1 {
-		return nil, fmt.Errorf("rangeover query yielded resultset with other than exactly 1 columns: %v", srs.Colnames)
+		return "", nil, fmt.Errorf("rangeover query yielded resultset with other than exactly 1 columns: %v", srs.Colnames)
 	}
 	if len(srs.Rows) < 1 {
-		return nil, fmt.Errorf("rangeover query yielded resultset with no rows")
+		return "", nil, fmt.Errorf("rangeover query yielded resultset with no rows")
 	}
 
 	itover := make([]string, len(srs.Rows))
 	for i, row := range srs.Rows {
 		sval, ok := db.ToString(row[0])
 		if !ok {
-			return nil, fmt.Errorf("rangeover query returned a value I don't know how to handle: %v", sval)
+			return "", nil, fmt.Errorf("rangeover query returned a value I don't know how to handle: %v", sval)
 		}
 		itover[i] = sval
 	}
-	return itover, nil
+	return srs.Colnames[0], itover, nil
 }
 
 func (mqrt *MetricQueryRecipeTemplated) Run(conn db.Conn) ([]db.ScannedResultSet, error) {
-	itover, err := mqrt.getRange(conn)
+	itname, itover, err := mqrt.getRange(conn)
 	if err != nil {
 		return nil, err
 	}
-	return mqrt.runQueries(conn, itover)
+	return mqrt.runQueries(conn, itname, itover)
 }
 
-func (mqrt *MetricQueryRecipeTemplated) runQueries(conn db.Conn, itover []string) ([]db.ScannedResultSet, error) {
+func (mqrt *MetricQueryRecipeTemplated) runQueries(conn db.Conn, itname string, itover []string) ([]db.ScannedResultSet, error) {
+	log.Debugf("running template queries over range %v", itover)
 	var buf bytes.Buffer
 	var accsrs = make([]db.ScannedResultSet, len(mqrt.Resultmaps))
 	for _, it := range itover {
@@ -166,7 +168,7 @@ func (mqrt *MetricQueryRecipeTemplated) runQueries(conn db.Conn, itover []string
 			}
 
 			for i, srs := range srss {
-				accsrs[i].Colnames = append(srs.Colnames, it)
+				accsrs[i].Colnames = append(srs.Colnames, itname)
 				for _, row := range srs.Rows {
 					row = append(row, it)
 					accsrs[i].Rows = append(accsrs[i].Rows, row)
@@ -176,6 +178,7 @@ func (mqrt *MetricQueryRecipeTemplated) runQueries(conn db.Conn, itover []string
 			buf.Reset()
 		}
 	}
+	log.Debugln("db results", accsrs)
 	return accsrs, nil
 }
 
@@ -188,9 +191,9 @@ func DumpMaps(recipes []MetricQueryRecipe) {
 				fmt.Printf("    %s\n", sql)
 			}
 		} else if r, ok := recipe.(*MetricQueryRecipeTemplated); ok {
-			fmt.Printf("    %s\n", r.Rangequery)
+			fmt.Printf("    rangeover: %s\n", r.Rangequery)
 			for _, tmpl := range r.Queries {
-				fmt.Printf("    ")
+				fmt.Printf("      ")
 				tmpl.Execute(os.Stdout, "{{.}}")
 				fmt.Println()
 			}
