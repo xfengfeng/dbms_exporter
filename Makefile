@@ -1,18 +1,18 @@
 
 GO_SRC := $(shell find . -type f -name "*.go")
 
-CONTAINER_NAME ?= ncabatoff/dbms_exporter:latest
-BUILD_CONTAINER_NAME ?= ncabatoff/dbms_exporter_builder:latest
+CONTAINER_NAME = ncabatoff/dbms_exporter:latest
+BUILD_CONTAINER_NAME = ncabatoff/dbms_exporter_builder:latest
 # Possible BUILDTAGS settings are postgres, freetds, and odbc.
-DRIVERS ?= "postgres freetds"
+DRIVERS = postgres freetds
 # Use make LDFLAGS= if you want to build with tag ODBC.
-LDFLAGS ?= "-extldflags=-static"
+LDFLAGS = -extldflags=-static
 
 all: vet test dbms_exporter
 
 # Simple go build
 dbms_exporter: $(GO_SRC)
-	go build -ldflags "$(LDFLAGS) -X main.Version=git:$(shell git rev-parse HEAD)" -o dbms_exporter -tags '$(DRIVERS)' .
+	go build -ldflags '$(LDFLAGS) -X main.Version=git:$(shell git rev-parse HEAD)' -o dbms_exporter -tags '$(DRIVERS)' .
 
 # Take a go build and turn it into a minimal container
 docker: dbms_exporter Dockerfile
@@ -36,7 +36,7 @@ docker-build: $(GO_SRC) Dockerfile-buildexporter Dockerfile
 	    -e SHELL_UID=$(shell id -u) -e SHELL_GID=$(shell id -g) \
 	    -w /go/src/github.com/ncabatoff/dbms_exporter \
 	    $(BUILD_CONTAINER_NAME) \
-	    /bin/bash -c 'make LDFLAGS=$(LDFLAGS) DRIVERS=$(DRIVERS) >&2 && chown $$SHELL_UID:$$SHELL_GID ./dbms_exporter'
+	    /bin/bash -c 'make LDFLAGS="$(LDFLAGS)" DRIVERS="$(DRIVERS)" >&2 && chown $$SHELL_UID:$$SHELL_GID ./dbms_exporter'
 	docker build -t $(CONTAINER_NAME) .
 
 .PHONY: docker-build docker test vet
