@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/ncabatoff/dbms_exporter/common"
 	"github.com/ncabatoff/dbms_exporter/config"
 	"github.com/ncabatoff/dbms_exporter/db"
@@ -197,12 +199,18 @@ func makeDescMaps(recipes []recipes.MetricQueryRecipe) map[string]MetricMapNames
 	return metricMap
 }
 
+type scrapeRequest struct {
+	results chan<- prometheus.Metric
+	done    chan struct{}
+}
+
 // Exporter collects DB metrics. It implements prometheus.Collector.
 type Exporter struct {
 	dsn                  string
 	driver               string
 	persistentConnection bool
 	conn                 db.Conn
+	scrapeChan           chan scrapeRequest
 	duration             prometheus.Gauge
 	totalScrapes         prometheus.Counter
 	errors_total         prometheus.Counter
@@ -250,6 +258,7 @@ func NewExporter(driver, dsn string, recipes []recipes.MetricQueryRecipe, persis
 		metricMap:            makeDescMaps(recipes),
 		recipes:              recipes,
 		persistentConnection: persistentConn,
+		scrapeChan:           make(chan scrapeRequest),
 	}
 }
 
@@ -283,13 +292,25 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	e.scrape(ch)
+	req := scrapeRequest{results: ch, done: make(chan struct{})}
+	e.scrapeChan <- req
+	<-req.done
+}
 
-	ch <- e.duration
-	ch <- e.totalScrapes
-	ch <- e.errors_total
-	ch <- e.open_seconds_total
-	e.query_seconds_total.Collect(ch)
+func (e *Exporter) Start() {
+	go func() {
+		for req := range e.scrapeChan {
+			ch := req.results
+			e.scrape(ch)
+
+			ch <- e.duration
+			ch <- e.totalScrapes
+			ch <- e.errors_total
+			ch <- e.open_seconds_total
+			e.query_seconds_total.Collect(ch)
+			req.done <- struct{}{}
+		}
+	}()
 }
 
 func (e *Exporter) scrapeRecipe(ch chan<- prometheus.Metric, conn db.Conn, recipe recipes.MetricQueryRecipe) {
@@ -452,6 +473,7 @@ func main() {
 	}
 
 	exporter := NewExporter(*driver, dsn, rcps, *persistentConnection)
+	exporter.Start()
 	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricPath, prometheus.Handler())
