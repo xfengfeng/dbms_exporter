@@ -2,7 +2,6 @@
 # Basic integration tests with postgres. Requires docker to work.
 
 VERSIONS=( \
-    9.1 \
     9.2 \
     9.3 \
     9.4 \
@@ -32,7 +31,12 @@ smoketest_postgres() {
         sleep 1
     done
 
-    DATA_SOURCE_NAME="postgresql://postgres:password@localhost:55432/?sslmode=disable" ./dbms_exporter &
+    # TODO Somehow despite the above test to make sure that psql works, I still get intermittant
+    # failures without a sleep here.  This just means it fails less intermittantly and is slower,
+    # so we should get to the bottom of it.  Maybe try pg_ctl status?
+    sleep 5
+
+    DATA_SOURCE_NAME="postgresql://postgres:password@localhost:55432/?sslmode=disable" ./dbms_exporter -driver postgres -queryfile postgres.yaml &
     exporter_pid=$!
     local DAEMON_WAIT_START=$(date +%s)
     while ! nc -z localhost 9113 ; do

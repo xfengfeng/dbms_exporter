@@ -2,7 +2,7 @@
 
 DBMS exporter for PostgresSQL, ODBC, and Sybase (FreeTDS) server metrics.
 
-Supported Postgres versions: 9.1 and up.
+Supported Postgres versions: 9.2 and up.
 
 Supported Sybase versions: 11 (and possibly up).  This is also the only database
 I've tried with ODBC, via freetds.
