@@ -47,6 +47,10 @@ var (
 		"persistent.connection", false,
 		"keep a DB connection open rather than opening a new one for each scrape",
 	)
+	queryFatalTimeout = flag.Duration(
+		"scrape.fatal-timeout", 0,
+		"exit if a scrape takes this long to execute",
+	)
 )
 
 // Metric name parts.
@@ -218,10 +222,11 @@ type Exporter struct {
 	query_seconds_total  *prometheus.CounterVec
 	metricMap            map[string]MetricMapNamespace
 	recipes              []recipes.MetricQueryRecipe
+	scrapeTimeoutFatal   time.Duration
 }
 
 // NewExporter returns a new exporter for the provided DSN.
-func NewExporter(driver, dsn string, recipes []recipes.MetricQueryRecipe, persistentConn bool) *Exporter {
+func NewExporter(driver, dsn string, recipes []recipes.MetricQueryRecipe, persistentConn bool, fatalTimeout time.Duration) *Exporter {
 	return &Exporter{
 		driver: driver,
 		dsn:    dsn,
@@ -259,6 +264,7 @@ func NewExporter(driver, dsn string, recipes []recipes.MetricQueryRecipe, persis
 		recipes:              recipes,
 		persistentConnection: persistentConn,
 		scrapeChan:           make(chan scrapeRequest),
+		scrapeTimeoutFatal:   fatalTimeout,
 	}
 }
 
@@ -294,7 +300,17 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	req := scrapeRequest{results: ch, done: make(chan struct{})}
 	e.scrapeChan <- req
-	<-req.done
+	var timeoutChan <-chan time.Time
+	if e.scrapeTimeoutFatal > 0 {
+		t := time.NewTimer(e.scrapeTimeoutFatal)
+		timeoutChan = t.C
+	}
+	select {
+	case <-req.done:
+		return
+	case <-timeoutChan:
+		log.Fatalf("timed out waiting %s for scrape to complete, exiting", e.scrapeTimeoutFatal)
+	}
 }
 
 func (e *Exporter) Start() {
@@ -472,7 +488,7 @@ func main() {
 		log.Fatal("couldn't find environment variable DATA_SOURCE_NAME")
 	}
 
-	exporter := NewExporter(*driver, dsn, rcps, *persistentConnection)
+	exporter := NewExporter(*driver, dsn, rcps, *persistentConnection, *queryFatalTimeout)
 	exporter.Start()
 	prometheus.MustRegister(exporter)
 
