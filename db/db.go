@@ -161,8 +161,8 @@ func dbStringToFloat64(s string, re *regexp.Regexp) (float64, bool) {
 	return result, true
 }
 
-// Convert database.sql types to float64s for Prometheus consumption. Null types are mapped to NaN. string and []byte
-// types are mapped as NaN and !ok
+// Convert database.sql types to float64s for Prometheus consumption. Null
+// types are mapped to NaN. string and []byte types are mapped as NaN and !ok
 func ToFloat64(t interface{}, r *regexp.Regexp) (float64, bool) {
 	switch v := t.(type) {
 	case int32:
@@ -184,6 +184,17 @@ func ToFloat64(t interface{}, r *regexp.Regexp) (float64, bool) {
 		return math.NaN(), true
 	default:
 		return math.NaN(), false
+	}
+}
+
+func ToUnsignedFloat64(t interface{}, r *regexp.Regexp) (float64, bool) {
+	switch v := t.(type) {
+	case int32:
+		return float64(uint32(v)), true
+	case int64:
+		return float64(uint64(v)), true
+	default:
+		return ToFloat64(t, r)
 	}
 }
 

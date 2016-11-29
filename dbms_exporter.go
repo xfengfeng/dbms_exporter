@@ -116,7 +116,7 @@ func makeDescMap(metricName string, resultMap recipes.ResultMap, recipe recipes.
 				vtype: prometheus.CounterValue,
 				desc:  newDesc(columnName, columnMapping.Description),
 				conversion: func(in interface{}) (float64, bool) {
-					return db.ToFloat64(in, regexp)
+					return db.ToUnsignedFloat64(in, regexp)
 				},
 			}
 		case common.GAUGE:
