@@ -329,21 +329,14 @@ func (e *Exporter) Start() {
 	}()
 }
 
-func (e *Exporter) scrapeRecipe(ch chan<- prometheus.Metric, conn db.Conn, recipe recipes.MetricQueryRecipe) {
+func (e *Exporter) scrapeRecipe(ch chan<- prometheus.Metric, conn db.Conn, recipe recipes.MetricQueryRecipe) error {
 	namespace := recipe.GetNamespace()
 	log.Debugln("Querying namespace: ", namespace)
 	qstart := time.Now()
 	srss, err := recipe.Run(conn)
 	e.query_seconds_total.WithLabelValues(namespace).Add(time.Since(qstart).Seconds())
-
 	if err != nil {
-		log.Infof("Error running query for %q: %v", namespace, err)
-		e.errors_total.Inc()
-		if e.conn != nil {
-			e.conn.Close()
-		}
-		e.conn = nil
-		return
+		return err
 	}
 
 	rms := recipe.GetResultMaps()
@@ -360,6 +353,7 @@ func (e *Exporter) scrapeRecipe(ch chan<- prometheus.Metric, conn db.Conn, recip
 		}
 		e.scrapeResultSet(ch, ns, srs, rm.ResultMap)
 	}
+	return nil
 }
 
 func (e *Exporter) scrapeResultSet(ch chan<- prometheus.Metric, namespace string, srs db.ScannedResultSet, rm recipes.ResultMap) {
@@ -443,7 +437,17 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 	}
 
 	for _, recipe := range e.recipes {
-		e.scrapeRecipe(ch, conn, recipe)
+		err := e.scrapeRecipe(ch, conn, recipe)
+
+		if err != nil {
+			log.Errorf("Error running query for %q: %v", recipe.GetNamespace(), err)
+			e.errors_total.Inc()
+			if e.conn != nil {
+				e.conn.Close()
+			}
+			e.conn = nil
+			return
+		}
 	}
 }
 
