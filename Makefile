@@ -10,8 +10,6 @@ DRIVERS = postgres freetds
 # Use make LDFLAGS= if you want to build with tag ODBC.
 LDFLAGS = -extldflags=-static
 
-GOX = gox -os="linux"
-
 all: vet test dbms_exporter
 
 # Simple go build
