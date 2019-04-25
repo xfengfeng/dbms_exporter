@@ -19,9 +19,10 @@ import (
 	"github.com/prometheus/common/log"
 )
 
-var Version string = "0.0.1"
+const VERSION string = "0.2.0"
 
 var (
+	version       = flag.Bool("version", false, "print version and exit")
 	listenAddress = flag.String(
 		"web.listen-address", ":9113",
 		"Address to listen on for web interface and telemetry.",
@@ -458,6 +459,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, usage)
 	}
 	flag.Parse()
+	if *version {
+		fmt.Printf("%s\n", VERSION)
+		os.Exit(0)
+	}
 
 	if *queriesPath == "" {
 		log.Fatalf("-queryfile is a required argument")
@@ -508,7 +513,7 @@ func main() {
 
 var usage = `
 The DATA_SOURCE_NAME enviroment variable specifies connection details.  Examples:
-	
+
   Sybase FreeTDS example (driver=freetds):
 	compatibility_mode=sybase;user=myuser;pwd=mypassword;server=myhostname
 
