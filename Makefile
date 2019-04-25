@@ -3,16 +3,20 @@ GO_SRC := $(shell find . -type f -name "*.go")
 
 CONTAINER_NAME = ncabatoff/dbms_exporter:latest
 BUILD_CONTAINER_NAME = ncabatoff/dbms_exporter_builder:latest
+TAG_VERSION ?= $(shell git describe --tags --abbrev=0)
+
 # Possible BUILDTAGS settings are postgres, freetds, and odbc.
 DRIVERS = postgres freetds
 # Use make LDFLAGS= if you want to build with tag ODBC.
 LDFLAGS = -extldflags=-static
 
+GOX = gox -os="linux"
+
 all: vet test dbms_exporter
 
 # Simple go build
 dbms_exporter: $(GO_SRC)
-	go build -ldflags '$(LDFLAGS) -X main.Version=git:$(shell git rev-parse HEAD)' -o dbms_exporter -tags '$(DRIVERS)' .
+	go build -ldflags '$(LDFLAGS) -X main.Version=$(TAG_VERSION)' -o dbms_exporter -tags '$(DRIVERS)' .
 
 # Take a go build and turn it into a minimal container
 docker: dbms_exporter Dockerfile
@@ -23,7 +27,7 @@ vet:
 
 test:
 	go test -v . ./config ./common ./db ./recipes
- 
+
 test-integration:
 	tests/test-smoke
 

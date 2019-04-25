@@ -19,7 +19,8 @@ import (
 	"github.com/prometheus/common/log"
 )
 
-const VERSION string = "0.2.0"
+// Version is set at build time use ldflags.
+var Version string
 
 var (
 	version       = flag.Bool("version", false, "print version and exit")
@@ -460,7 +461,7 @@ func main() {
 	}
 	flag.Parse()
 	if *version {
-		fmt.Printf("%s\n", VERSION)
+		fmt.Printf("dbms-exporter version %s\n", Version)
 		os.Exit(0)
 	}
 
