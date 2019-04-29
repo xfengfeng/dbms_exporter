@@ -4,21 +4,19 @@ jobs:
   build:
     docker:
       - image: ncabatoff/dbms_exporter_builder:1.1.5
-    working_directory: /go/src/github.com/ncabatoff/dbms_exporter
     steps:
       - checkout
       - run: make vet test dbms_exporter
 
-#  image:
-#    environment:
-#        IMAGE_NAME: ncabatoff/dbms_exporter
-#    docker:
-#      - image: docker:stable-git
-#    working_directory: /go/src/github.com/ncabatoff/dbms_exporter
-#    steps:
-#      - checkout
-#      - setup_remote_docker
-#      - run: docker build -t $IMAGE_NAME:latest .
+  image:
+    environment:
+        IMAGE_NAME: ncabatoff/dbms_exporter
+    docker:
+      - image: docker:stable-git
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run: docker build -t $IMAGE_NAME:latest .
 #      - run: |
 #          echo "$DOCKERHUB_PASSWORD"| docker login -u $DOCKERHUB_USERNAME --password-stdin
 #          docker push $IMAGE_NAME:latest
@@ -53,7 +51,7 @@ workflows:
   build_and_image:
     jobs:
       - build
-#      - image
+      - image
 #  release:
 #    jobs:
 #      - release:
