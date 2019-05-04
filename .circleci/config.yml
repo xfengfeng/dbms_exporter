@@ -2,6 +2,8 @@ version: 2
 jobs:
 
   build:
+    environment:
+      GOFLAGS: -mod=vendor
     docker:
       - image: ncabatoff/dbms_exporter_builder:1.1.5
     steps:
@@ -22,6 +24,8 @@ jobs:
           docker push $IMAGE_NAME:latest
 
   release:
+    environment:
+      GOFLAGS: -mod=vendor
     docker:
       - image: ncabatoff/dbms_exporter_builder:1.1.5
     steps:

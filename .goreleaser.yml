@@ -3,7 +3,7 @@ builds:
     binary: dbms_exporter
     flags:
       - -tags="postgres freetds"
-    ldflags: -extldflags=-static -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+    ldflags: -extldflags=-static -s -w -X main.Version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
     goos:
       - linux
     goarch:
