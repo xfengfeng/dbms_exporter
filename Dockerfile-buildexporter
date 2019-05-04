@@ -1,7 +1,9 @@
-FROM golang:1.7.1-wheezy
-RUN wget ftp://ftp.freetds.org/pub/freetds/stable/freetds-patched.tar.gz
-RUN sh -c "tar zxf freetds-patched.tar.gz && cd freetds-1.* && ./configure && make install"
+FROM golang:1.12
+ARG FREETDS_VERSION=1.1.5
+RUN wget ftp://ftp.freetds.org/pub/freetds/stable/freetds-$FREETDS_VERSION.tar.gz
+RUN tar zxf freetds-${FREETDS_VERSION}.tar.gz
+WORKDIR freetds-${FREETDS_VERSION}
+RUN ./configure
+RUN make install
 RUN apt-get update && apt-get -y install unixodbc-dev
-RUN go get github.com/minus5/gofreetds
-RUN go get github.com/alexbrainman/odbc
 

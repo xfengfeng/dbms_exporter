@@ -1,0 +1,41 @@
+builds:
+  - main: dbms_exporter.go
+    binary: dbms_exporter
+    flags:
+      - -tags="postgres freetds"
+    ldflags: -extldflags=-static -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+#      - 386
+#      - arm
+#      - arm64
+#      - ppc64
+#      - ppc64le
+archive:
+  name_template: "dbms_exporter-{{ .Version }}.{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+  wrap_in_directory: true
+#nfpm:
+#  homepage: https://github.com/ncabatoff/dbms_exporter
+#  maintainer: nick.cabatoff+dbmsexp@gmail.com
+#  description: Prometheus exporter to report on Postgres/FreeTDS/ODBC DBs
+#  license: MIT
+#  formats:
+#    - deb
+#    - rpm
+#  bindir: /usr/bin
+#  files:
+#    "packaging/dbms_exporter.service": "/lib/systemd/system/dbms_exporter.service"
+#  config_files:
+#    "packaging/conf/all.yaml": "/etc/dbms_exporter/all.yaml"
+#  scripts:
+#    postinstall: "packaging/scripts/postinstall.sh"
+#    postremove: "packaging/scripts/postremove.sh"
+#    preremove: "packaging/scripts/preremove.sh"
+release:
+  github:
+    owner: ncabatoff
+    name: dbms_exporter
+  draft: false
+  prerelease: true
