@@ -2,7 +2,7 @@ builds:
   - main: dbms_exporter.go
     binary: dbms_exporter
     flags:
-      - -tags="postgres freetds"
+      - -tags=postgres freetds
     ldflags: -extldflags=-static -s -w -X main.Version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
     goos:
       - linux
@@ -13,9 +13,9 @@ builds:
 #      - arm64
 #      - ppc64
 #      - ppc64le
-archive:
-  name_template: "dbms_exporter-{{ .Version }}.{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
-  wrap_in_directory: true
+archives:
+  - name_template: "dbms_exporter-{{ .Version }}.{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    wrap_in_directory: true
 #nfpm:
 #  homepage: https://github.com/ncabatoff/dbms_exporter
 #  maintainer: nick.cabatoff+dbmsexp@gmail.com

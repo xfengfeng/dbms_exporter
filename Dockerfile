@@ -1,7 +1,7 @@
+FROM ncabatoff/dbms_exporter_builder:1.1.5
 ARG drivers="postgres freetds"
 ARG ldflags="-extldflags=-static"
 
-FROM ncabatoff/dbms_exporter_builder:1.1.5
 WORKDIR /build
 COPY . .
 ENV GOFLAGS="-mod=vendor"
