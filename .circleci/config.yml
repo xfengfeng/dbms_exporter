@@ -79,9 +79,11 @@ jobs:
       - image: ncabatoff/dbms_exporter_builder:1.1.5
     steps:
       - checkout
-      - run: curl -LO https://github.com/goreleaser/goreleaser/releases/latest/download/goreleaser_amd64.deb
-      - run: dpkg -i goreleaser_amd64.deb
-      - run: goreleaser release
+      - run: |
+          curl -LO https://github.com/goreleaser/goreleaser/releases/latest/download/goreleaser_amd64.deb
+          dpkg -i goreleaser_amd64.deb
+          rm goreleaser_amd64.deb
+          goreleaser release
 
   release_image:
     environment:
