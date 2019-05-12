@@ -9,6 +9,55 @@ jobs:
     steps:
       - checkout
       - run: make vet test dbms_exporter
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dbms_exporter
+            - sybase-short.yaml
+            - postgres.yaml
+
+  testpg:
+    docker:
+      - image: docker:stable-git
+    steps:
+      - attach_workspace:
+          at: workspace
+      - setup_remote_docker
+      - run: docker run -d --name pg -e 'POSTGRES_PASSWORD=pgpass' postgres:11
+      - run: |
+          docker create -v /de --name de debian:stretch /bin/true
+          docker cp workspace/. de:/de
+      - run: >
+          docker run --network container:pg -d
+          --volumes-from de
+          -e DATA_SOURCE_NAME='postgresql://postgres:pgpass@localhost:5432/?sslmode=disable'
+          debian:stretch
+          /de/dbms_exporter -queryfile /de/postgres.yaml -driver postgres
+      - run: |
+          test 0 -lt $(docker run --network container:pg byrnedo/alpine-curl --retry 10 --retry-connrefused localhost:9113/metrics |
+            awk '/postgres_pg_stat_activity_count[{]datname="postgres",state="active"[}]/{ print $2 }')
+
+  testsyb:
+    docker:
+      - image: docker:stable-git
+    steps:
+      - attach_workspace:
+          at: workspace
+      - setup_remote_docker
+      - run: docker run -d --name syb -e 'SYBASE_USER=guest' -h dksybase datagrip/sybase:16.0
+      - run: |
+          docker create -v /de --name de debian:stretch /bin/true
+          docker cp workspace/. de:/de
+          sleep 60
+      - run: >
+          docker run --name sybde --network container:syb -d
+          --volumes-from de
+          -e DATA_SOURCE_NAME='compatibility_mode=sybase;user=guest;pwd=guest1234;server=localhost:5000'
+          debian:stretch
+          /de/dbms_exporter -queryfile /de/sybase-short.yaml -driver sybase -persistent.connection=true
+      - run: |
+          test 0 -lt $(docker run --network container:syb byrnedo/alpine-curl --retry 10 --retry-connrefused localhost:9113/metrics |
+            awk '/sybase_spid_count_by_user_conns[{]dbuser="guest"[}]/{ print $2 }')
 
   image:
     environment:
@@ -30,9 +79,9 @@ jobs:
       - image: ncabatoff/dbms_exporter_builder:1.1.5
     steps:
       - checkout
-#      - run: sudo apt-get -qq update
-#      - run: sudo apt-get install -y rpm
-      - run: curl -sL https://git.io/goreleaser | bash
+      - run: curl -LO https://github.com/goreleaser/goreleaser/releases/latest/download/goreleaser_amd64.deb
+      - run: dpkg -i goreleaser_amd64.deb
+      - run: goreleaser release
 
   release_image:
     environment:
@@ -53,7 +102,16 @@ workflows:
   build_and_image:
     jobs:
       - build
-      - image
+      - testpg:
+          requires:
+            - build
+      - testsyb:
+          requires:
+            - build
+      - image:
+          requires:
+            - testpg
+            - testsyb
   release:
     jobs:
       - release:

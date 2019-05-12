@@ -51,7 +51,7 @@ See the [github.com/lib/pq](http://github.com/lib/pq) module for other ways to f
 ### FreeTDS/Sybase
 
 You can use "sybase" as an alias for the freetds driver; it behaves the same
-except that metrics start with `sybase_` isntead of `freetds_`.
+except that metrics start with `sybase_` instead of `freetds_`.
 
 ```
 DATA_SOURCE_NAME="compatibility_mode=sybase;user=myuser;pwd=mypassword;server=myhostname" \
