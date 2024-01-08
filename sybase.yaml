@@ -162,11 +162,19 @@ dbsize:
           description: "short device name"
       - size:
           usage: "GAUGE"
-          regexp: ^([\d.]+)\s+MB$
+          regexp: "^\\s*([\\d.]+)\\s+MB$"
           description: "size in MB"
       - usage:
           usage: "LABEL"
           description: "data or log"
+      - created:
+          usage: "DISCARD"
+      - durability:
+          usage: "DISCARD"
+      - inrowlen:
+          usage: "GAUGE"
+          description: "num rows"
       - "free kbytes":
           usage: "GAUGE"
+          regexp: "^\\s*([\\d]+)$"
           description: "free space in KB"
